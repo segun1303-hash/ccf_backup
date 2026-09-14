@@ -209,7 +209,7 @@
     <p class="eyebrow">CCFOLIA LOG ARCHIVE</p>
     <h1>코코포리아 로그 백업기</h1>
     <p>코코포리아 HTML 로그를 불러와 읽기 좋은 기록으로 정리하고, 탭·발언자·스크립트와 사진을 손본 뒤 티스토리용 HTML로 저장합니다.</p>
-    <div class="hero-meta"><span>제작자: 라맨</span><span>ChatGPT 바이브 코딩을 이용해 제작</span><span>버전 v1.6.5 · 최종 수정 2026-08-12 09:02 KST</span><span>파일은 브라우저 안에서만 처리</span></div>
+    <div class="hero-meta"><span>제작자: 라맨</span><span>ChatGPT 바이브 코딩을 이용해 제작</span><span>버전 v1.6.7 · 최종 수정 2026-09-15 KST</span><span>파일은 브라우저 안에서만 처리</span></div>
   </header>
 
   <div id="integrityWarning" class="integrity-warning" hidden>파일의 실행 코드가 끝까지 읽히지 않았습니다. 이 파일은 손상되었거나 저장 도중 잘렸을 수 있으므로, 작업을 시작하지 말고 정상 사본을 다시 받아 주세요.</div>
@@ -273,6 +273,7 @@
       <label class="check"><input id="cardTransparent" type="checkbox"> 로그 카드도 투명</label>
       <label class="check"><input id="adaptColors" type="checkbox" checked> 발언자 색 자동 보정</label>
       <label class="check"><input id="showPortraits" type="checkbox" checked> 일반 대화에 초상화 표시</label>
+      <label class="check"><input id="useImportedPortraits" type="checkbox" checked> 원본의 발언별 초상화 유지 (직접 지정한 이미지 우선)</label>
       <label class="check"><input id="showBadges" type="checkbox" checked> 일반 대화에 탭 배지 표시</label>
       <label class="check"><input id="styleDice" type="checkbox" checked> 주사위 결과 색상 표시</label>
       <label class="check"><input id="mergeJournals" type="checkbox" checked> 같은 저널의 연속 스크립트 합치기</label>
@@ -321,9 +322,9 @@ const $$=s=>[...document.querySelectorAll(s)];
 const mappings=$('#mappings');
 const LOAD_SIZE=150;
 const SPEAKER_LOAD_SIZE=40;
-const APP_VERSION='1.6.5';
-const APP_UPDATED='2026-08-12 09:02 KST';
-const PROJECT_FORMAT=2;
+const APP_VERSION='1.6.7';
+const APP_UPDATED='2026-09-15 KST';
+const PROJECT_FORMAT=3;
 const TAB_COLORS=['#4f6bdc','#8b5fbf','#d97706','#0f8a75','#c24152','#627085'];
 let parsed=null,editorShown=LOAD_SIZE,speakerShown=SPEAKER_LOAD_SIZE,selectedLineId=null,nextLineId=1,builtParts=[],lastDeleted=null,searchTimer=null,editorObserver=null;
 let previewAutoDark=Boolean(globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches);
@@ -357,9 +358,31 @@ function readLine(p){
   return {id:makeId(),entryType:'chat',tab:cleanTab(rawTab),name,messageHtml:safeMessage(messageHtml),messageText:htmlToPlain(messageHtml),edited:false,color:p.style.color||'',kindOverride:'auto'};
 }
 function analyze(html){
-  const doc=new DOMParser().parseFromString(html,'text/html'),lines=[];
-  doc.querySelectorAll('p').forEach(p=>{const line=readLine(p);if(line)lines.push(line)});
-  return {lines,filename:'',names:unique(lines.map(x=>x.name)),tabs:unique(lines.map(x=>x.tab))};
+  const doc=new DOMParser().parseFromString(html,'text/html'),lines=[],portraits={};
+  const messages=doc.querySelectorAll('article.message[data-channel]');
+  if(messages.length){
+    // Read only the known image-class declarations; never execute imported scripts/CSS.
+    const images={};
+    for(const style of doc.querySelectorAll('style')){
+      const re=/\.((?:avatar-image-)\d+)\s*\{\s*background-image\s*:\s*url\(\s*(["'])(.*?)\2\s*\)\s*;?\s*\}/gs;
+      for(const m of style.textContent.matchAll(re)){
+        const src=validImageSource(m[3]);if(src)images[m[1]]=src;
+      }
+    }
+    for(const article of messages){
+      const speaker=article.querySelector('.speaker'),body=article.querySelector('.message-text');
+      if(!body)continue;
+      const avatar=article.querySelector('.avatar'),key=avatar?[...avatar.classList].find(x=>images[x]):null;
+      if(key)portraits[key]=images[key];
+      const text=[htmlToPlain(body.innerHTML),...Array.from(article.querySelectorAll('.roll-result')).filter(x=>!body.contains(x)).map(x=>htmlToPlain(x.innerHTML))].filter(Boolean).join('\n');
+      lines.push({id:makeId(),entryType:'chat',tab:cleanTab(article.querySelector('.channel-name')?.textContent||article.dataset.channel),name:speaker?.textContent.trim()||'시스템',messageHtml:'',messageText:text,edited:Boolean(article.querySelector('.edited')),color:speaker?.style.getPropertyValue('--speaker-color')||'',kindOverride:article.classList.contains('system')?'system':'auto',portraitKey:key||'',timestamp:article.querySelector('time')?.getAttribute('datetime')||''});
+    }
+  }else{
+    // Some exports store per-tab copies too. Import the all-tab container only.
+    const root=doc.getElementById('__tab__all')||doc;
+    root.querySelectorAll('p,div').forEach(p=>{const line=readLine(p);if(line)lines.push(line)});
+  }
+  return {lines,portraits,filename:'',names:unique(lines.map(x=>x.name)),tabs:unique(lines.map(x=>x.tab))};
 }
 function validImageSource(source=''){return /^(https?:\/\/|data:image\/)/i.test(String(source).trim())?String(source).trim():''}
 function formatBytes(bytes=0){if(bytes<1024)return `${bytes} B`;if(bytes<1024*1024)return `${(bytes/1024).toFixed(1)} KB`;return `${(bytes/1024/1024).toFixed(1)} MB`}
@@ -412,7 +435,16 @@ async function processPortraitFile(file){
 }
 
 function speakerCount(name){return parsed?parsed.lines.filter(x=>x.entryType!=='photo'&&x.name===name).length:0}
+function importedPortrait(name){
+  if(!$('#useImportedPortraits').checked)return '';
+  const key=parsed?.lines.find(line=>line.name===name&&parsed.portraits?.[line.portraitKey])?.portraitKey;
+  return validImageSource(parsed?.portraits?.[key]);
+}
 function updateImagePreview(row,source='',label=''){
+  if(!validImageSource(source)){
+    const original=importedPortrait(row.querySelector('.who')?.value.trim()||row._sourceName);
+    if(original){source=original;label='원본의 발언별 초상화 사용 중 · 대표 이미지 미리보기'}
+  }
   const preview=row.querySelector('.image-preview'),demo=row.querySelector('.portrait-demo'),state=row.querySelector('.image-state'),safe=validImageSource(source),fit=row.querySelector('.fit')?.value||'cover',x=percentValue(row.querySelector('.pos-x')?.value),y=percentValue(row.querySelector('.pos-y')?.value);
   [preview,demo].filter(Boolean).forEach(box=>{box.innerHTML=safe?`<img src="${esc(safe)}" alt="">`:'없음';const img=box.querySelector('img');if(img){img.style.objectFit=fit;img.style.objectPosition=`${x}% ${y}%`;img.onerror=()=>{box.textContent='오류';state.textContent='이미지를 불러올 수 없습니다.'}}});
   if(demo){const shape=$('#portraitShape')?.value||'rounded';demo.style.borderRadius=shape==='circle'?'50%':shape==='square'?'4px':'15px'}
@@ -420,7 +452,7 @@ function updateImagePreview(row,source='',label=''){
 }
 function updateSpeakerCard(row){
   const name=row.querySelector('.who').value.trim()||'이름 없음',kind=row.querySelector('.kind').value,source=row._imageData||row.querySelector('.url').value.trim();
-  row.dataset.name=name.toLowerCase();row.dataset.hasImage=validImageSource(source)?'1':'0';row.dataset.kind=kind;
+  row.dataset.name=name.toLowerCase();row.dataset.hasImage=validImageSource(source)||importedPortrait(name)?'1':'0';row.dataset.kind=kind;
   row.querySelector('.summary-name').textContent=name;
   row.querySelector('.summary-count').textContent=`발언 ${speakerCount(name).toLocaleString()}개`;
   row.querySelector('.summary-state').textContent=`${kind==='system'?'스크립트 · 메인만':'일반 대화'} · ${row.dataset.hasImage==='1'?'이미지 설정':'이미지 없음'}`;
@@ -465,7 +497,7 @@ function filterSpeakers(){
   $('#speakerLoad').hidden=shown>=matched.length;$('#loadMoreSpeakers').textContent=`다음 ${Math.min(SPEAKER_LOAD_SIZE,matched.length-shown).toLocaleString()}명 더 보기`;
 }
 
-function isMainTab(tab=''){return cleanTab(tab).toLowerCase()==='main'}
+function isMainTab(tab=''){return ['main','메인','メイン'].includes(cleanTab(tab).toLowerCase())}
 function effectiveKind(line,map=getMap()){if(line.entryType==='photo')return'photo';return line.kindOverride==='auto'?(map[line.name]?.kind||'chat'):line.kindOverride}
 function outputKind(line,map=getMap()){const kind=effectiveKind(line,map);return kind==='system'&&isMainTab(line.tab)?'system':kind==='photo'?'photo':'chat'}
 function getOutputTabState(){const state={};$$('#outputTabs input').forEach(x=>state[x.value]=x.checked);return state}
@@ -588,7 +620,7 @@ $('#logFile').onchange=async e=>{
   $('#logTitle').value=file.name.replace(/\.html?$/i,'').replace(/\[all\]\s*\(\d+\)$/i,'').trim()||'SESSION LOG';
   $('#saveProject').disabled=false;
   $('#output').value='';$('#preview').innerHTML='<div class="empty">설정을 확인한 뒤 미리보기를 만들어 주세요.</div>';$('#outputStale').hidden=true;markDirty();$('#outputStale').hidden=true;
-  setStatus(parsed.lines.length?`${file.name}\n대화 ${parsed.lines.length.toLocaleString()}개 · 탭 ${parsed.tabs.length}개 · 발언자 ${parsed.names.length}명을 읽었습니다.`:`${file.name}\n읽을 수 있는 로그를 찾지 못했습니다. 코코포리아에서 내보낸 원본 HTML인지 확인해 주세요.`,Boolean(parsed.lines.length));
+  setStatus(parsed.lines.length?`${file.name}\n대화 ${parsed.lines.length.toLocaleString()}개 · 탭 ${parsed.tabs.length}개 · 발언자 ${parsed.names.length}명을 읽었습니다. 원본 초상화 ${Object.keys(parsed.portraits||{}).length}종을 포함했습니다.`:`${file.name}\n읽을 수 있는 로그를 찾지 못했습니다. 지원하는 코코포리아 HTML 로그인지 확인해 주세요.`,Boolean(parsed.lines.length));
 };
 $('#projectFile').onchange=async e=>{
   const file=e.target.files[0];if(!file)return;
@@ -662,6 +694,15 @@ function buildPart(source,meta,settings){
   const tabs=unique(outputLines.map(x=>x.tab)).map((name,i)=>({name,id:String(i),hue:(225+i*67)%360,className:`t${i}`,style:tabStyles[name]||{mode:'standard'}})),tabMap=Object.fromEntries(tabs.map(x=>[x.name,x]));
   const chatLines=outputLines.filter(x=>x._outputKind==='chat'),speakerClasses={},speakerRules=[];
   unique(chatLines.map(x=>x.name)).forEach((name,index)=>{const data=map[name]||{},image=showPortraits?data.url:'',className=`s${index}`,sample=chatLines.find(x=>x.name===name);speakerClasses[name]=className;speakerRules.push(`${scope} .${className}{--sl:${readableColor(sample?.color||'',false,adapt)};--sd:${readableColor(sample?.color||'',true,adapt)}}${image?`${scope} .${className} .ccf-av:after{content:"";position:absolute;inset:0;background-color:var(--u);background-image:url("${cssUrl(image)}");background-position:${data.posX??50}% ${data.posY??50}%;background-size:${data.fit==='contain'?'contain':'cover'};background-repeat:no-repeat}`:''}`)});
+  const importedClasses=new Map();
+  if(showPortraits&&settings.useImportedPortraits){
+    for(const line of chatLines){
+      const key=line.portraitKey,src=validImageSource(settings.portraits?.[key]);
+      if(!src||map[line.name]?.url||importedClasses.has(key))continue;
+      const cls='ip'+importedClasses.size;importedClasses.set(key,cls);
+      speakerRules.push(`${scope} .ccf-av.${cls}:after{content:"";position:absolute;inset:0;background-image:url("${cssUrl(src)}");background-size:100% 100%;background-position:center;background-repeat:no-repeat}`);
+    }
+  }
   const tabRules=tabs.map(t=>`${scope} .${t.className}{--q:${t.hue};--bc:${t.style.accent||t.style.badge||`hsl(${t.hue} 56% 50%)`}}${tabStyleRule(scope,t,t.style)}`).join('\n');
   const buttons=[`<button type="button" class="bt on" data-f="A" aria-pressed="true">전체</button>`,...tabs.map(t=>`<button type="button" class="bt ${t.className} on" data-f="${t.id}" aria-pressed="true"><i></i>${esc(t.name)}</button>`)].map(button=>`        ${button}`).join('\n');
   const diceClass={critical:'dc',extreme:'dx',hard:'dh',success:'ds',failure:'df',fumble:'dp',roll:'dr'};
@@ -669,7 +710,7 @@ function buildPart(source,meta,settings){
     const tab=tabMap[line.tab]||tabs[0],styled=tab.style.mode!=='standard'?' st':'';
     if(line._outputKind==='photo'){const p=line.photo||{},src=validImageSource(p.src),caption=p.caption?`<figcaption>${plainToHtml(p.caption)}</figcaption>`:'',image=src?`<img src="${esc(src)}" alt="${esc(p.alt||'')}" loading="lazy" decoding="async">`:`<div class="ph-missing">${esc(p.alt||'사진 없음')}</div>`;return `<figure class="ph ph-${p.align||'center'} ph-${p.size||'medium'} ${tab.className}${styled}" data-t="${tab.id}">${image}${caption}</figure>`}
     const message=plainToHtml(line.messageText);if(line._outputKind==='system')return `<section class="j ${tab.className}${styled}" data-t="${tab.id}">${message}</section>`;
-    const badge=showBadges?`<span class="tb ${tab.className}">${esc(line.tab)}</span>`:'',speakerClass=speakerClasses[line.name]||'',dice=styleDice?diceResult(line.messageText):null,content=dice?`<div class="di ${diceClass[dice.state]||'dr'}"><span>${esc(dice.label)}</span><div>${message}</div></div>`:message,portrait=showPortraits?`<div class="ccf-av" aria-hidden="true"></div>`:'';
+    const badge=showBadges?`<span class="tb ${tab.className}">${esc(line.tab)}</span>`:'',speakerClass=speakerClasses[line.name]||'',dice=styleDice?diceResult(line.messageText):null,content=dice?`<div class="di ${diceClass[dice.state]||'dr'}"><span>${esc(dice.label)}</span><div>${message}</div></div>`:message,portrait=showPortraits?`<div class="ccf-av${!map[line.name]?.url&&importedClasses.has(line.portraitKey)?' '+importedClasses.get(line.portraitKey):''}" aria-hidden="true"></div>`:'';
     return `<article class="e ${speakerClass} ${tab.className}${styled}" data-t="${tab.id}">${portrait}<div class="eb"><div class="nm"><b>${esc(line.name)}</b>${badge}</div><div class="ms">${content}</div></div></article>`;
   }).map(line=>`        ${line}`).join('\n');
   const bgL=transparent?'transparent':'#f5f6f8',bgD=transparent?'transparent':'#15171c',cardL=cardTransparent?'transparent':'#fff',cardD=cardTransparent?'transparent':'#20232a',radius=shape==='circle'?'50%':shape==='square'?'4px':'12px',mobileRadius=shape==='circle'?'50%':shape==='square'?'3px':'9px',pad=density==='compact'?Math.max(8,rowSpacing-5):rowSpacing,scriptPad=density==='compact'?'11px 8px':'16px 10px';
@@ -748,6 +789,7 @@ ${script}`;
 }
 function estimateEntryBytes(line,map,seen,showPortraits=true){
   let bytes=280+(line.entryType==='photo'?(line.photo?.caption||'').length*3+(line.photo?.src||'').length:(line.messageText||'').length*3);
+  const imageKey='portrait:'+line.portraitKey;if(showPortraits&&$('#useImportedPortraits').checked&&!map[line.name]?.url&&line.portraitKey&&!seen.has(imageKey)){seen.add(imageKey);bytes+=(parsed?.portraits?.[line.portraitKey]||'').length+200}
   if(line.entryType!=='photo'&&!seen.has(line.name)){seen.add(line.name);bytes+=(showPortraits?(map[line.name]?.url||'').length:0)+180}return bytes;
 }
 function splitByCount(lines,size){const chunks=[];let current=[];for(const line of lines){if(current.length>=size&&line.entryType!=='photo'){chunks.push(current);current=[]}current.push(line)}if(current.length)chunks.push(current);return chunks}
@@ -755,7 +797,7 @@ function splitBySize(lines,target,map,showPortraits=true){
   const chunks=[];let current=[],estimate=14500,seen=new Set();
   for(const line of lines){const testSeen=new Set(seen),cost=estimateEntryBytes(line,map,testSeen,showPortraits);if(current.length&&estimate+cost>target&&line.entryType!=='photo'){chunks.push(current);current=[];estimate=14500;seen=new Set()}estimate+=estimateEntryBytes(line,map,seen,showPortraits);current.push(line)}if(current.length)chunks.push(current);return chunks;
 }
-function getSettings(){return {map:getMap(),theme:$('#theme').value,transparent:$('#transparent').checked,cardTransparent:$('#cardTransparent').checked,adapt:$('#adaptColors').checked,showPortraits:$('#showPortraits').checked,showBadges:$('#showBadges').checked,styleDice:$('#styleDice').checked,density:$('#density').value,shape:$('#portraitShape').value,title:$('#logTitle').value.trim()||'SESSION LOG',mergeJournals:$('#mergeJournals').checked,tabStyles:getTabStyles(),logWidth:Number($('#logWidth').value),fontSize:Number($('#fontSize').value),lineHeight:Number($('#lineHeight').value),portraitSize:Number($('#portraitSize').value),rowSpacing:Number($('#rowSpacing').value),speakerNameSize:Number($('#speakerNameSize').value),messageSize:Number($('#messageSize').value),tabFontSize:Number($('#tabFontSize').value),cardRadius:Number($('#cardRadius').value),textOnlyInset:Number($('#textOnlyInset').value)}}
+function getSettings(){return {map:getMap(),theme:$('#theme').value,transparent:$('#transparent').checked,cardTransparent:$('#cardTransparent').checked,adapt:$('#adaptColors').checked,showPortraits:$('#showPortraits').checked,useImportedPortraits:$('#useImportedPortraits').checked,portraits:parsed?.portraits||{},showBadges:$('#showBadges').checked,styleDice:$('#styleDice').checked,density:$('#density').value,shape:$('#portraitShape').value,title:$('#logTitle').value.trim()||'SESSION LOG',mergeJournals:$('#mergeJournals').checked,tabStyles:getTabStyles(),logWidth:Number($('#logWidth').value),fontSize:Number($('#fontSize').value),lineHeight:Number($('#lineHeight').value),portraitSize:Number($('#portraitSize').value),rowSpacing:Number($('#rowSpacing').value),speakerNameSize:Number($('#speakerNameSize').value),messageSize:Number($('#messageSize').value),tabFontSize:Number($('#tabFontSize').value),cardRadius:Number($('#cardRadius').value),textOnlyInset:Number($('#textOnlyInset').value)}}
 function build(){
   if(!parsed||!parsed.lines.length){alert('먼저 로그 HTML을 선택해 주세요.');return[]}
   const included=new Set($$('#outputTabs input:checked').map(input=>input.value)),sourceLines=parsed.lines.filter(line=>included.has(line.tab));if(!sourceLines.length){alert('출력할 탭을 하나 이상 선택해 주세요.');return[]}
@@ -794,7 +836,7 @@ ${part.script}
 </html>`
 }
 function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-const PROJECT_SETTING_IDS=['logTitle','theme','density','portraitShape','transparent','cardTransparent','adaptColors','showPortraits','showBadges','styleDice','mergeJournals','optimizePhotos','photoMaxWidth','logWidth','fontSize','lineHeight','portraitSize','rowSpacing','speakerNameSize','messageSize','tabFontSize','cardRadius','textOnlyInset','splitOutput','splitMode','partSize'];
+const PROJECT_SETTING_IDS=['logTitle','theme','density','portraitShape','transparent','cardTransparent','adaptColors','showPortraits','useImportedPortraits','showBadges','styleDice','mergeJournals','optimizePhotos','photoMaxWidth','logWidth','fontSize','lineHeight','portraitSize','rowSpacing','speakerNameSize','messageSize','tabFontSize','cardRadius','textOnlyInset','splitOutput','splitMode','partSize'];
 function getProjectSettings(){const values={};PROJECT_SETTING_IDS.forEach(id=>{const el=$('#'+id);values[id]=el.type==='checkbox'?el.checked:el.value});return values}
 function applyProjectSettings(values={}){
   PROJECT_SETTING_IDS.forEach(id=>{const el=$('#'+id);if(!el||values[id]===undefined)return;if(el.type==='checkbox')el.checked=Boolean(values[id]);else el.value=String(values[id])});
@@ -807,13 +849,13 @@ function normalizeProjectLine(raw={}){
     const p=raw.photo&&typeof raw.photo==='object'?raw.photo:{};
     return {id:makeId(),entryType:'photo',tab,name:'',messageText:'',kindOverride:'photo',photo:{src:validImageSource(p.src),alt:String(p.alt||''),caption:String(p.caption||''),align:['left','center','right'].includes(p.align)?p.align:'center',size:['small','medium','large','full'].includes(p.size)?p.size:'medium',state:String(p.state||'')}};
   }
-  return {id:makeId(),entryType:'chat',tab,name:String(raw.name||'시스템'),messageHtml:'',messageText:String(raw.messageText||htmlToPlain(raw.messageHtml||'')),edited:Boolean(raw.edited),color:String(raw.color||''),kindOverride:['auto','chat','system'].includes(raw.kindOverride)?raw.kindOverride:'auto'};
+  return {id:makeId(),entryType:'chat',tab,name:String(raw.name||'시스템'),messageHtml:'',messageText:String(raw.messageText||htmlToPlain(raw.messageHtml||'')),edited:Boolean(raw.edited),color:String(raw.color||''),kindOverride:['auto','chat','system'].includes(raw.kindOverride)?raw.kindOverride:'auto',portraitKey:String(raw.portraitKey||''),timestamp:String(raw.timestamp||'')};
 }
-function makeProjectData(){return {type:'ccfolia-log-backup-project',format:PROJECT_FORMAT,appVersion:APP_VERSION,savedAt:new Date().toISOString(),parsed:{filename:parsed.filename||'',lines:parsed.lines},map:getMap(),tabStyles:getTabStyles(),outputTabs:getOutputTabState(),settings:getProjectSettings()}}
+function makeProjectData(){return {type:'ccfolia-log-backup-project',format:PROJECT_FORMAT,appVersion:APP_VERSION,savedAt:new Date().toISOString(),parsed:{filename:parsed.filename||'',lines:parsed.lines,portraits:parsed.portraits||{}},map:getMap(),tabStyles:getTabStyles(),outputTabs:getOutputTabState(),settings:getProjectSettings()}}
 function restoreProject(data,sourceName='작업 파일'){
   if(!data||data.type!=='ccfolia-log-backup-project'||!data.parsed||!Array.isArray(data.parsed.lines))throw new Error('지원하는 작업 파일 형식이 아닙니다.');
   const format=Number(data.format||1);if(!Number.isInteger(format)||format<1)throw new Error('작업 파일의 형식 번호가 올바르지 않습니다.');if(format>PROJECT_FORMAT)throw new Error(`이 작업 파일은 더 새 버전의 도구에서 만들어졌습니다. v${data.appVersion||'최신 버전'} 도구로 열어 주세요.`);
-  nextLineId=1;const lines=data.parsed.lines.map(normalizeProjectLine);parsed={filename:String(data.parsed.filename||sourceName),lines,names:unique(lines.filter(x=>x.entryType!=='photo').map(x=>x.name)),tabs:unique(lines.map(x=>x.tab))};
+  nextLineId=1;const lines=data.parsed.lines.map(normalizeProjectLine);parsed={filename:String(data.parsed.filename||sourceName),lines,portraits:Object.fromEntries(Object.entries(data.parsed.portraits||{}).map(([key,src])=>[key,validImageSource(src)]).filter(([,src])=>src)),names:unique(lines.filter(x=>x.entryType!=='photo').map(x=>x.name)),tabs:unique(lines.map(x=>x.tab))};
   mappings.innerHTML='';speakerShown=SPEAKER_LOAD_SIZE;$('#speakerSearch').value='';$('#speakerFilter').value='all';
   const savedMap=data.map&&typeof data.map==='object'?data.map:{};
   Object.entries(savedMap).forEach(([name,item])=>{const value=item&&typeof item==='object'?item:{},source=validImageSource(value.url);addMappingRow(name,source.startsWith('data:')?'':source,value.kind==='system'?'system':'chat',{imageData:source.startsWith('data:')?source:'',fit:value.fit==='contain'?'contain':'cover',posX:percentValue(value.posX),posY:percentValue(value.posY)})});
@@ -837,7 +879,7 @@ function updateSplitUi(){
 }
 $('#splitOutput').onchange=()=>{updateSplitUi();markDirty()};$('#splitMode').onchange=()=>{updateSplitUi();markDirty()};$('#partSize').oninput=markDirty;
 $('#selectAllOutputTabs').onclick=()=>{$$('#outputTabs input').forEach(input=>input.checked=true);markDirty()};$('#clearOutputTabs').onclick=()=>{$$('#outputTabs input').forEach(input=>input.checked=false);markDirty()};
-const designIds=['logTitle','theme','density','portraitShape','transparent','cardTransparent','adaptColors','showPortraits','showBadges','styleDice','mergeJournals','optimizePhotos','photoMaxWidth'];
+const designIds=['logTitle','theme','density','portraitShape','transparent','cardTransparent','adaptColors','showPortraits','useImportedPortraits','showBadges','styleDice','mergeJournals','optimizePhotos','photoMaxWidth'];
 designIds.forEach(id=>$('#'+id).addEventListener($('#'+id).type==='text'?'input':'change',markDirty));
 ['theme','cardTransparent'].forEach(id=>$('#'+id).addEventListener('change',refreshAllTabPreviews));
 function applyPreviewTheme(){
@@ -851,6 +893,7 @@ $('#theme').addEventListener('change',()=>{if($('#theme').value==='auto')preview
 $('#previewThemeToggle').onclick=()=>{previewAutoDark=!previewAutoDark;applyPreviewTheme()};
 function updatePortraitControls(){const enabled=$('#showPortraits').checked;$('#portraitShape').disabled=!enabled;$('#portraitSize').disabled=!enabled}
 $('#showPortraits').addEventListener('change',updatePortraitControls);updatePortraitControls();
+$('#useImportedPortraits').addEventListener('change',()=>{$$('#mappings .map-row').forEach(updateSpeakerCard)});
 $('#portraitShape').addEventListener('change',()=>$$('#mappings .map-row').forEach(row=>{const source=row._imageData||row.querySelector('.url').value.trim();updateImagePreview(row,source,row.querySelector('.image-state').textContent)}));
 [['logWidth','logWidthValue','px'],['fontSize','fontSizeValue','px'],['lineHeight','lineHeightValue',''],['portraitSize','portraitSizeValue','px'],['rowSpacing','rowSpacingValue','px'],['speakerNameSize','speakerNameSizeValue','px'],['messageSize','messageSizeValue','px'],['tabFontSize','tabFontSizeValue','px'],['cardRadius','cardRadiusValue','px'],['textOnlyInset','textOnlyInsetValue','px']].forEach(([id,out,unit])=>$('#'+id).oninput=e=>{$('#'+out).textContent=e.target.value+unit;markDirty()});
 $('#make').onclick=()=>{
